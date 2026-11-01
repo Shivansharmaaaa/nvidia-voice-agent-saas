@@ -1,0 +1,395 @@
+// Multi-tenant SaaS Voice Agent Platform
+// Prisma Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTH & TENANCY ====================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  avatar        String?
+  authProvider  String    @default("clerk") // clerk, auth0, etc.
+  authId        String    @unique
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Multi-tenant relationships
+  organizationMemberships OrganizationMember[]
+  auditLogs              AuditLog[]
+
+  @@index([email])
+  @@index([authId])
+}
+
+model Organization {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  logo        String?
+  plan        String    @default("free") // free, pro, enterprise
+  settings    Json?     // Custom org settings
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relationships
+  members     OrganizationMember[]
+  agents      Agent[]
+  callSessions CallSession[]
+  analytics   Analytics[]
+  subscription BillingSubscription?
+  usageRecords UsageRecord[]
+  invoices    Invoice[]
+  usageLimit  UsageLimit?
+
+  @@index([slug])
+}
+
+model OrganizationMember {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String       @default("member") // owner, admin, member, viewer
+  joinedAt       DateTime     @default(now())
+
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+// ==================== AGENT CONFIGURATION ====================
+
+model Agent {
+  id              String    @id @default(cuid())
+  organizationId  String
+  name            String
+  description     String?
+  status          String    @default("draft") // draft, active, paused, archived
+  phoneNumber     String?   @unique // Twilio phone number
+  twilioSid       String?   // Twilio service SID
+
+  // Agent persona
+  businessName    String?
+  industry        String?
+  persona         Json?     // Voice tone, personality traits
+
+  // Voice settings
+  voiceModel      String    @default("magpie") // magpie, custom
+  voiceSettings   Json?     // Speed, pitch, etc.
+  language        String    @default("en-US")
+
+  // AI Configuration
+  llmModel        String    @default("nemotron-3-nano")
+  llmModelVersion String?   // Model version (e.g., "v1.0.0")
+  temperature     Float     @default(0.7)
+  maxTokens       Int       @default(500)
+  systemPrompt    String?   // Base system prompt
+
+  // Knowledge base
+  knowledgeBase   Json?     // FAQs, scripts, documents
+
+  // Dialogue rules
+  dialogueRules   Json?     // Escalation rules, timeouts, etc.
+  escalationEmail String?   // Email for human takeover
+
+  // Metadata
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deployedAt      DateTime?
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  promptTemplates PromptTemplate[]
+  callSessions    CallSession[]
+  analytics       Analytics[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([phoneNumber])
+}
+
+model PromptTemplate {
+  id          String   @id @default(cuid())
+  agentId     String
+  name        String
+  description String?
+  template    String   // Jinja2-style template
+  variables   Json?    // Available variables
+  category    String   @default("general") // general, greeting, escalation, etc.
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([category])
+}
+
+// ==================== CALL SESSIONS & TRANSCRIPTS ====================
+
+model CallSession {
+  id            String    @id @default(cuid())
+  organizationId String
+  agentId       String
+  twilioCallSid String    @unique // Twilio call SID
+  phoneNumber   String    // Caller's phone number
+  direction     String    // inbound, outbound
+  status        String    @default("ringing") // ringing, in-progress, completed, failed
+  duration      Int?      // Duration in seconds
+  startTime     DateTime  @default(now())
+  endTime       DateTime?
+
+  // Metrics
+  latency       Json?     // Average latency per turn
+  interruptions Int       @default(0)
+  escalations   Int       @default(0)
+  humanTakeover Boolean   @default(false)
+
+  // Metadata
+  metadata      Json?     // Additional call metadata
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent         Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  transcripts   Transcript[]
+  analytics     Analytics?
+  usageRecord   UsageRecord?
+  piiRedactions PIIRedaction[]
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@index([twilioCallSid])
+  @@index([startTime])
+}
+
+model Transcript {
+  id            String    @id @default(cuid())
+  callSessionId String
+  speaker       String    // user, agent
+  text          String
+  timestamp     DateTime  @default(now())
+  confidence    Float?    // ASR confidence score
+  latency       Int?      // Processing latency in ms
+  metadata      Json?     // Additional transcript metadata
+
+  callSession   CallSession @relation(fields: [callSessionId], references: [id], onDelete: Cascade)
+
+  @@index([callSessionId])
+  @@index([timestamp])
+}
+
+// ==================== ANALYTICS ====================
+
+model Analytics {
+  id            String    @id @default(cuid())
+  organizationId String
+  agentId       String?
+  callSessionId String?   @unique
+  date          DateTime  @default(now())
+
+  // Metrics
+  totalCalls    Int       @default(0)
+  totalDuration Int       @default(0) // Total seconds
+  avgLatency    Float?    // Average latency in ms
+  avgDuration   Float?    // Average call duration
+  completionRate Float?   // % of calls completed
+  escalationRate Float?   // % of calls escalated
+  satisfactionScore Float? // Optional satisfaction rating
+
+  // Breakdowns
+  byHour        Json?     // Calls by hour
+  byDay         Json?     // Calls by day
+  byStatus      Json?     // Calls by status
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent         Agent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  callSession   CallSession? @relation(fields: [callSessionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@index([date])
+}
+
+// ==================== SECURITY & COMPLIANCE ====================
+
+model AuditLog {
+  id            String    @id @default(cuid())
+  userId        String?
+  organizationId String?
+  action        String    // create, update, delete, login, etc.
+  resource      String    // agent, user, organization, etc.
+  resourceId    String?
+  details       Json?     // Additional details
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime  @default(now())
+
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model PIIRedaction {
+  id            String    @id @default(cuid())
+  callSessionId String
+  originalText  String
+  redactedText  String
+  piiTypes      String[]  // email, phone, ssn, credit_card, etc.
+  createdAt     DateTime  @default(now())
+
+  callSession   CallSession @relation(fields: [callSessionId], references: [id], onDelete: Cascade)
+
+  @@index([callSessionId])
+}
+
+// ==================== BILLING & USAGE METERING ====================
+
+model BillingPlan {
+  id            String    @id @default(cuid())
+  name          String    @unique // free, pro, enterprise
+  displayName   String
+  description   String?
+  price         Float     // Monthly price in USD
+  callMinutes   Int?      // Included call minutes per month (null = unlimited)
+  agents        Int?      // Max agents (null = unlimited)
+  features      Json?     // Plan features
+  stripePriceId String?   // Stripe Price ID
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subscriptions BillingSubscription[]
+
+  @@index([name])
+}
+
+model BillingSubscription {
+  id                String       @id @default(cuid())
+  organizationId    String       @unique
+  planId            String
+  stripeCustomerId  String?      @unique
+  stripeSubscriptionId String?    @unique
+  status            String       @default("active") // active, canceled, past_due, trialing
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean      @default(false)
+  trialEndsAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  organization      Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan              BillingPlan   @relation(fields: [planId], references: [id])
+  usageRecords      UsageRecord[]
+  invoices          Invoice[]
+
+  @@index([organizationId])
+  @@index([stripeCustomerId])
+  @@index([status])
+}
+
+model UsageRecord {
+  id                String    @id @default(cuid())
+  organizationId    String
+  subscriptionId    String
+  agentId           String?
+  callSessionId     String?    @unique
+  date              DateTime  @default(now())
+
+  // Usage metrics
+  callMinutes       Float     @default(0) // Call duration in minutes
+  asrSeconds        Float     @default(0) // ASR processing seconds
+  llmTokens         Int       @default(0)  // LLM tokens consumed
+  ttsSeconds        Float     @default(0) // TTS synthesis seconds
+
+  // Billing
+  cost              Float     @default(0) // Cost in USD
+  isBilled          Boolean   @default(false)
+  billedAt          DateTime?
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  subscription      BillingSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  callSession       CallSession?     @relation(fields: [callSessionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([subscriptionId])
+  @@index([date])
+  @@index([isBilled])
+}
+
+model Invoice {
+  id                String    @id @default(cuid())
+  organizationId    String
+  subscriptionId    String
+  stripeInvoiceId   String?   @unique
+  number            String    @unique
+  status            String    // draft, open, paid, void, uncollectible
+  amount            Float     // Total amount in USD
+  currency          String    @default("usd")
+  periodStart       DateTime
+  periodEnd         DateTime
+  dueDate           DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  subscription      BillingSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  lineItems         InvoiceLineItem[]
+
+  @@index([organizationId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model InvoiceLineItem {
+  id            String    @id @default(cuid())
+  invoiceId     String
+  description   String
+  quantity      Float
+  unitPrice     Float
+  amount        Float
+  metadata      Json?     // Additional item metadata
+  createdAt     DateTime  @default(now())
+
+  invoice       Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+model UsageLimit {
+  id                String    @id @default(cuid())
+  organizationId    String    @unique
+  planId            String
+
+  // Soft limits (warnings)
+  softCallMinutes   Int?      // Warning threshold
+  softAgents        Int?      // Warning threshold
+
+  // Hard limits (enforced)
+  hardCallMinutes   Int?      // Hard limit (null = unlimited)
+  hardAgents       Int?      // Hard limit (null = unlimited)
+
+  // Current usage (reset monthly)
+  currentCallMinutes Float    @default(0)
+  currentAgents      Int       @default(0)
+  resetAt            DateTime  // Next reset date
+
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}

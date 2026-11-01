@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: voice-agent-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-voiceagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceagent123}
+      POSTGRES_DB: ${POSTGRES_DB:-voiceagent}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voiceagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: voice-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: voice-agent-backend
+    environment:
+      DATABASE_URL: postgresql://voiceagent:voiceagent123@postgres:5432/voiceagent
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+      PORT: 3001
+      FRONTEND_URL: http://localhost:3000
+      API_URL: http://localhost:3001
+      WS_URL: ws://localhost:3002
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run start:dev
+
+  # AI Service (Python)
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: voice-agent-ai
+    environment:
+      DATABASE_URL: postgresql://voiceagent:voiceagent123@postgres:5432/voiceagent
+      REDIS_URL: redis://redis:6379
+      BACKEND_API_URL: http://backend:3001/api
+      NEMOTRON_SPEECH_URL: ${NEMOTRON_SPEECH_URL:-http://localhost:8001}
+      NEMOTRON_LLM_URL: ${NEMOTRON_LLM_URL:-http://localhost:8002}
+      MAGPIE_TTS_URL: ${MAGPIE_TTS_URL:-http://localhost:8003}
+      HOST: 0.0.0.0
+      PORT: 3002
+    ports:
+      - "3002:3002"
+    depends_on:
+      - backend
+      - redis
+    volumes:
+      - ./ai-service:/app
+      - ai_service_logs:/app/logs
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: voice-agent-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001/api
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+  ai_service_logs:
